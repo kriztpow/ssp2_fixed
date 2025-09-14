@@ -17,11 +17,8 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.IBinder
 import android.util.Log
-import android.view.Surface
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.net.InetAddress
 import java.net.NetworkInterface
 import java.util.Collections
 
@@ -34,50 +31,80 @@ class ScreenCaptureService : Service() {
     private var height = 1920
     private var dpi = 320
 
+    companion object {
+        private const val TAG = "ScreenCaptureService"
+    }
+
     override fun onBind(intent: Intent?): IBinder? {
         return null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand called")
+        
         if (intent != null) {
             val resultCode = intent.getIntExtra("resultCode", -1)
             val data = intent.getParcelableExtra<Intent>("data")
-            startProjection(resultCode, data)
+            
+            if (resultCode != -1 && data != null) {
+                Log.d(TAG, "Starting projection with resultCode: $resultCode")
+                startProjection(resultCode, data)
+            } else {
+                Log.e(TAG, "Invalid resultCode or data. resultCode: $resultCode, data: $data")
+                stopSelf()
+            }
+        } else {
+            Log.e(TAG, "Intent is null")
+            stopSelf()
         }
+        
         return START_STICKY
     }
 
-    private fun startProjection(resultCode: Int, data: Intent?) {
-        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data!!)
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        mediaProjection?.registerCallback(MediaProjectionCallback(), null)
+    private fun startProjection(resultCode: Int, data: Intent) {
+        try {
+            val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data)
+            
+            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            mediaProjection?.registerCallback(MediaProjectionCallback(), null)
 
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture",
-            width, height, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, null
-        )
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                width, height, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
 
-        imageReader?.setOnImageAvailableListener(ImageAvailableListener(), null)
-        startWebServer()
-        createNotification()
+            imageReader?.setOnImageAvailableListener(ImageAvailableListener(), null)
+            startWebServer()
+            createNotification()
+            
+            Log.d(TAG, "Projection started successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting projection: ${e.message}")
+            stopSelf()
+        }
     }
 
     private fun stopProjection() {
-        virtualDisplay?.release()
-        mediaProjection?.stop()
-        webServer?.stop()
+        try {
+            virtualDisplay?.release()
+            mediaProjection?.stop()
+            webServer?.stop()
+            Log.d(TAG, "Projection stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping projection: ${e.message}")
+        }
     }
 
     private fun startWebServer() {
         webServer = WebServer()
         try {
             webServer?.start()
-            Log.d("WebServer", "Server started at: ${getLocalIpAddress()}:8080")
+            Log.d(TAG, "Web server started at: ${getLocalIpAddress()}:8080")
         } catch (e: Exception) {
-            Log.e("WebServer", "Error starting server: ${e.message}")
+            Log.e(TAG, "Error starting web server: ${e.message}")
         }
     }
 
@@ -93,38 +120,43 @@ class ScreenCaptureService : Service() {
                 }
             }
         } catch (ex: Exception) {
-            Log.e("IPAddress", "Error getting IP address: ${ex.message}")
+            Log.e(TAG, "Error getting IP address: ${ex.message}")
         }
         return "0.0.0.0"
     }
 
     private fun createNotification() {
-        val channelId = "screen_capture_channel"
-        val channelName = "Screen Capture Service"
-        val importance = NotificationManager.IMPORTANCE_DEFAULT
-        val channel = NotificationChannel(channelId, channelName, importance)
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.createNotificationChannel(channel)
+        try {
+            val channelId = "screen_capture_channel"
+            val channelName = "Screen Capture Service"
+            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            val channel = NotificationChannel(channelId, channelName, importance)
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.createNotificationChannel(channel)
 
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, notificationIntent, 
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+            val notificationIntent = Intent(this, MainActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, notificationIntent, 
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
 
-        // Usar un icono de notificación por defecto de Android
-        val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Screen Sharing Active")
-            .setContentText("Streaming screen to ${getLocalIpAddress()}:8080")
-            .setSmallIcon(android.R.drawable.ic_menu_camera) // Icono por defecto
-            .setContentIntent(pendingIntent)
-            .build()
+            val notification = Notification.Builder(this, channelId)
+                .setContentTitle("Screen Sharing Active")
+                .setContentText("Streaming screen to ${getLocalIpAddress()}:8080")
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setContentIntent(pendingIntent)
+                .build()
 
-        startForeground(1, notification)
+            startForeground(1, notification)
+            Log.d(TAG, "Notification created")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating notification: ${e.message}")
+        }
     }
 
     inner class MediaProjectionCallback : MediaProjection.Callback() {
         override fun onStop() {
+            Log.d(TAG, "MediaProjection stopped")
             stopProjection()
         }
     }
@@ -141,7 +173,6 @@ class ScreenCaptureService : Service() {
                     val rowStride = planes[0].rowStride
                     val rowPadding = rowStride - pixelStride * width
 
-                    // Create bitmap
                     val bitmap = Bitmap.createBitmap(
                         width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888
                     )
@@ -149,7 +180,7 @@ class ScreenCaptureService : Service() {
                     webServer?.updateImage(bitmap)
                 }
             } catch (e: Exception) {
-                Log.e("ImageAvailable", "Error processing image: ${e.message}")
+                Log.e(TAG, "Error processing image: ${e.message}")
             } finally {
                 image?.close()
             }
@@ -164,7 +195,6 @@ class ScreenCaptureService : Service() {
         }
 
         override fun serve(session: IHTTPSession): Response {
-            // Usar newFixedLengthResponse en lugar de newChunkedResponse
             val response = newFixedLengthResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", null)
             response.addHeader("Connection", "close")
             response.addHeader("Max-Age", "0")
@@ -183,23 +213,23 @@ class ScreenCaptureService : Service() {
                             image.compress(Bitmap.CompressFormat.JPEG, 50, baos)
                             val imageBytes = baos.toByteArray()
 
-                            // Usar el método send de la respuesta para enviar datos
-                            val outputStream = ByteArrayOutputStream()
-                            outputStream.write("--frame\r\n".toByteArray())
-                            outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
-                            outputStream.write("Content-Length: ${imageBytes.size}\r\n\r\n".toByteArray())
-                            outputStream.write(imageBytes)
-                            outputStream.write("\r\n\r\n".toByteArray())
-                            
-                            // Actualizar la respuesta con los datos
-                            response.setData(outputStream.toByteArray().inputStream())
-                            
-                            // Small delay to prevent overwhelming the client
+                            val boundaryData = (
+                                "--frame\r\n" +
+                                "Content-Type: image/jpeg\r\n" +
+                                "Content-Length: ${imageBytes.size}\r\n\r\n"
+                            ).toByteArray()
+
+                            val finalData = ByteArray(boundaryData.size + imageBytes.size + 4)
+                            System.arraycopy(boundaryData, 0, finalData, 0, boundaryData.size)
+                            System.arraycopy(imageBytes, 0, finalData, boundaryData.size, imageBytes.size)
+                            System.arraycopy("\r\n\r\n".toByteArray(), 0, finalData, boundaryData.size + imageBytes.size, 4)
+
+                            response.setData(finalData.inputStream())
                             Thread.sleep(100)
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("WebServer", "Error serving stream: ${e.message}")
+                    Log.e(TAG, "Error serving stream: ${e.message}")
                 }
             }.start()
 
@@ -209,6 +239,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "Service destroyed")
         stopProjection()
     }
 }
