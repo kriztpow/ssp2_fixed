@@ -42,7 +42,8 @@ class ScreenCaptureService : Service() {
 
         if (intent != null) {
             val resultCode = intent.getIntExtra("resultCode", -1)
-            val data = intent.getParcelableExtra(Intent::class.java.classLoader, "data")
+            // ✅ Forma moderna y compatible
+            val data = intent.getParcelableExtra("data", Intent::class.java)
 
             if (resultCode != -1 && data != null) {
                 Log.d(TAG, "Starting projection with resultCode: $resultCode")
