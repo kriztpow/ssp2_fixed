@@ -1,0 +1,4 @@
+Applied fixes:
+- Downgraded Android Gradle plugin to 8.5.2
+- Added pluginManagement repositories in settings.gradle
+- Updated gradle.properties to match reference
