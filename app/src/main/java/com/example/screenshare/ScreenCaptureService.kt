@@ -3,177 +3,221 @@ package com.example.screenshare
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
-import android.util.DisplayMetrics
 import android.util.Log
-import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
-import fi.iki.elonen.NanoHTTPD.Response
-import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import java.io.ByteArrayOutputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
-import java.util.concurrent.Executors
+import java.io.IOException
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.util.Collections
+import java.util.concurrent.LinkedBlockingQueue
 
 class ScreenCaptureService : Service() {
 
     private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-    private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
-    private var httpServer: SimpleMjpegServer? = null
-    private val pool = Executors.newSingleThreadExecutor()
-    @Volatile private var lastFrame: ByteArray? = null
+    private var webServer: WebServer? = null
+    private var mediaProjectionManager: MediaProjectionManager? = null
 
-    companion object {
-        const val NOTIF_CHANNEL_ID = "screen_capture_channel"
-        const val NOTIF_CHANNEL_NAME = "Screen Capture"
-        const val NOTIF_ID = 1
+    private val notificationId = 101
+    private val channelId = "ScreenCaptureChannel"
+
+    override fun onCreate() {
+        super.onCreate()
+        mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        createNotificationChannel()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        createNotificationChannelIfNeeded()
-        val notification = buildNotification()
-
-        // Arrancar el servicio en primer plano inmediatamente
-        startForeground(NOTIF_ID, notification)
-
-        try {
-            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-            val metrics = DisplayMetrics()
-            wm.defaultDisplay.getRealMetrics(metrics)
-            val width = metrics.widthPixels
-            val height = metrics.heightPixels
-            val density = metrics.densityDpi
-
-            imageReader = ImageReader.newInstance(
-                width,
-                height,
-                android.graphics.PixelFormat.RGBA_8888,
-                2
-            )
-            // MediaProjection no configurado en este ejemplo (null para compilar seguro)
-            virtualDisplay = null
-
-            httpServer = SimpleMjpegServer(8080)
-            httpServer?.start()
-
-            // Simulación de frames para evitar necesitar MediaProjection en compilación
-            pool.submit {
-                while (!Thread.currentThread().isInterrupted) {
-                    try {
-                        val bmp = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)
-                        val baos = ByteArrayOutputStream()
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 60, baos)
-                        lastFrame = baos.toByteArray()
-                        baos.close()
-                        bmp.recycle()
-                        Thread.sleep(200)
-                    } catch (t: Throwable) {
-                        Log.e("SCS", "Frame loop error", t)
-                        break
-                    }
-                }
+        if (intent != null) {
+            val resultCode = intent.getIntExtra("resultCode", -1)
+            val data = intent.getParcelableExtra<Intent>("data")
+            if (data != null && resultCode != -1) {
+                startCapture(resultCode, data)
             }
-        } catch (e: Exception) {
-            Log.e("SCS", "Start error", e)
+        }
+        return START_STICKY
+    }
+
+    private fun startCapture(resultCode: Int, data: Intent) {
+        mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
+        imageReader = ImageReader.Builder(1080).setHeight(1920).setFormat(PixelFormat.RGBA_8888).setMaxImages(2).build()
+
+        virtualDisplay = mediaProjection?.createVirtualDisplay(
+            "ScreenCapture",
+            1080,
+            1920,
+             resources.displayMetrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader?.surface,
+            null,
+            null
+        )
+
+        webServer = WebServer()
+        try {
+            webServer?.start()
+            showNotification(webServer?.getHostAddress())
+        } catch (e: IOException) {
+            e.printStackTrace()
         }
 
-        return START_STICKY
+        imageReader?.setOnImageAvailableListener({ reader ->
+            var image: Image? = null
+            try {
+                image = reader.acquireLatestImage()
+                if (image != null) {
+                    val bitmap = imageToBitmap(image)
+                    webServer?.updateImage(bitmap)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                image?.close()
+            }
+        }, null)
+    }
+
+    private fun imageToBitmap(image: Image): Bitmap {
+        val planes = image.planes
+        val buffer = planes[0].buffer
+        val pixelStride = planes[0].pixelStride
+        val rowStride = planes[0].rowStride
+        val rowPadding = rowStride - pixelStride * image.width
+        val width = image.width + rowPadding / pixelStride
+        val bitmap = Bitmap.createBitmap(width, image.height, Bitmap.Config.ARGB_8888)
+        bitmap.copyPixelsFromBuffer(buffer)
+        return bitmap
+    }
+
+    private fun showNotification(ipAddress: String?) {
+        val notificationIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0, notificationIntent, PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Transmisión de pantalla activa")
+            .setContentText("Dirección: $ipAddress")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        startForeground(notificationId, notification)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val serviceChannel = NotificationChannel(
+                channelId,
+                "Screen Capture Service Channel",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(serviceChannel)
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        httpServer?.stop()
+        webServer?.stop()
         virtualDisplay?.release()
-        imageReader?.close()
         mediaProjection?.stop()
-        pool.shutdownNow()
     }
 
-    private fun createNotificationChannelIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val chan = NotificationChannel(
-                NOTIF_CHANNEL_ID,
-                NOTIF_CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(chan)
-        }
-    }
+    inner class WebServer : NanoHTTPD(8080) {
 
-    private fun buildNotification(): Notification {
-        return NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
-            .setContentTitle("Screen sharing active")
-            .setContentText("Your screen is being shared")
-            .setSmallIcon(android.R.drawable.ic_menu_camera)  // usar tu ícono real
-            .setOngoing(true)
-            .build()
-    }
+        private val imageQueue = LinkedBlockingQueue<Bitmap>(2)
+        private var isStreaming = false
 
-    private inner class SimpleMjpegServer(port: Int) : NanoHTTPD(port) {
-        @Volatile private var last: ByteArray? = null
-
-        override fun serve(session: IHTTPSession?): Response {
-            val uri = session?.uri ?: "/"
-            return when (uri) {
-                "/stream" -> serveMjpeg()
-                else -> newFixedLengthResponse(
-                    Response.Status.OK,
-                    "text/html",
-                    "<html><body><h1>Screen Share</h1></body></html>"
-                )
+        fun updateImage(bitmap: Bitmap) {
+            if (imageQueue.size >= 2) {
+                imageQueue.poll()
             }
+            imageQueue.offer(bitmap)
         }
 
-        fun updateFrame(frame: ByteArray) {
-            last = frame
-        }
-
-        private fun serveMjpeg(): Response {
-            val boundary = "--frame"
-
-            val pipedOut = PipedOutputStream()
-            val pipedIn = PipedInputStream(pipedOut)
-
-            pool.submit {
-                try {
-                    while (!Thread.currentThread().isInterrupted) {
-                        val frame = last ?: lastFrame
-                        if (frame != null) {
-                            val header = ("$boundary\r\n" +
-                                    "Content-Type: image/jpeg\r\n" +
-                                    "Content-Length: ${frame.size}\r\n\r\n").toByteArray()
-                            pipedOut.write(header)
-                            pipedOut.write(frame)
-                            pipedOut.write("\r\n".toByteArray())
-                            pipedOut.flush()
+        fun getHostAddress(): String {
+            var ip = ""
+            try {
+                val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+                for (intf in interfaces) {
+                    val addrs = Collections.list(intf.inetAddresses)
+                    for (addr in addrs) {
+                        if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                            ip = addr.hostAddress
+                            break
                         }
-                        Thread.sleep(100)
                     }
-                } catch (e: Exception) {
-                    Log.e("SCS", "Stream thread error", e)
-                } finally {
-                    try {
-                        pipedOut.close()
-                    } catch (_: Exception) {}
                 }
+            } catch (ex: Exception) {
+                ex.printStackTrace()
             }
+            return "http://$ip:8080/stream"
+        }
 
-            return newChunkedResponse(
-                Response.Status.OK,
-                "multipart/x-mixed-replace; boundary=$boundary",
-                pipedIn
-            )
+        override fun serve(session: IHTTPSession): Response {
+            if (session.uri == "/stream") {
+                isStreaming = true
+                val response = Response.newChunkedResponse(
+                    Response.Status.OK,
+                    "multipart/x-mixed-replace; boundary=--frameboundary",
+                    null
+                )
+                response.addHeader("Connection", "close")
+                response.addHeader("Max-Age", "0")
+                response.addHeader("Expires", "0")
+                response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0")
+                response.addHeader("Pragma", "no-cache")
+                response.addHeader("Access-Control-Allow-Origin", "*")
+
+                Thread {
+                    try {
+                        while (isStreaming) {
+                            val image = imageQueue.take()
+                            val baos = ByteArrayOutputStream()
+                            image.compress(Bitmap.CompressFormat.JPEG, 50, baos)
+                            val imageBytes = baos.toByteArray()
+
+                            val part = "--frameboundary\r\n" +
+                                    "Content-Type: image/jpeg\r\n" +
+                                    "Content-Length: ${imageBytes.size}\r\n" +
+                                    "\r\n"
+                            response.write(part.toByteArray())
+                            response.write(imageBytes)
+                            response.write("\r\n".toByteArray())
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        isStreaming = false
+                    }
+                }.start()
+
+                return response
+            }
+            return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
         }
     }
 }
