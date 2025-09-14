@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
-import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
@@ -17,15 +16,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var btnToggle: Button
     private var isSharing = false
-    private var resultDataIntent: Intent? = null
     private lateinit var projectionManager: MediaProjectionManager
 
     private val requestCapture =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode == Activity.RESULT_OK) {
                 result.data?.let { intent ->
-                    resultDataIntent = intent
-                    startCaptureService()
+                    startCaptureService(result.resultCode, intent)
+                    isSharing = true
+                    updateStatus()
                 }
             }
         }
@@ -36,7 +35,8 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
         btnToggle = findViewById(R.id.btnToggle)
-        projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projectionManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
         btnToggle.setOnClickListener {
             if (!isSharing) {
@@ -44,41 +44,28 @@ class MainActivity : AppCompatActivity() {
                 requestCapture.launch(captureIntent)
             } else {
                 stopCaptureService()
+                isSharing = false
+                updateStatus()
             }
         }
 
         updateStatus()
     }
 
-    private fun startCaptureService() {
+    private fun startCaptureService(resultCode: Int, data: Intent) {
         val svc = Intent(this, ScreenCaptureService::class.java)
-        svc.putExtra("resultData", resultDataIntent)
+        svc.putExtra("resultCode", resultCode)
+        svc.putExtra("data", data)
         ContextCompat.startForegroundService(this, svc)
-        isSharing = true
-        updateStatus()
     }
 
     private fun stopCaptureService() {
         val svc = Intent(this, ScreenCaptureService::class.java)
         stopService(svc)
-        isSharing = false
-        updateStatus()
     }
 
     private fun updateStatus() {
-        val ip = getLocalIpAddress()
-        tvStatus.text = if (isSharing) "Compartiendo en http://$ip:8080/" else "Detenido - IP: $ip"
-        btnToggle.text = if (isSharing) "Detener" else "Compartir"
-    }
-
-    private fun getLocalIpAddress(): String {
-        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val ip = wm.connectionInfo.ipAddress
-        return String.format("%d.%d.%d.%d", ip and 0xff, ip shr 8 and 0xff, ip shr 16 and 0xff, ip shr 24 and 0xff)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        if (isSharing) stopCaptureService()
+        tvStatus.text = if (isSharing) "Screen Sharing: ON" else "Screen Sharing: OFF"
+        btnToggle.text = if (isSharing) "Stop Sharing" else "Start Sharing"
     }
 }
