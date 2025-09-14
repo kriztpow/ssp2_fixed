@@ -13,7 +13,8 @@ import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoHTTPD.Response
 import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import java.io.ByteArrayOutputStream
-import java.io.OutputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.util.concurrent.Executors
 
 class ScreenCaptureService : Service() {
@@ -36,14 +37,19 @@ class ScreenCaptureService : Service() {
             val height = metrics.heightPixels
             val density = metrics.densityDpi
 
-            imageReader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 2)
-            // Note: mediaProjection setup omitted here; keep as null for compile-time safety if not provided
+            imageReader = ImageReader.newInstance(
+                width,
+                height,
+                android.graphics.PixelFormat.RGBA_8888,
+                2
+            )
+            // MediaProjection no configurado en este ejemplo (null para compilar seguro)
             virtualDisplay = null
 
             httpServer = SimpleMjpegServer(8080)
             httpServer?.start()
 
-            // Simulate frames (to avoid needing MediaProjection at compile time)
+            // Simulación de frames para evitar MediaProjection en compilación
             pool.submit {
                 while (!Thread.currentThread().isInterrupted) {
                     try {
@@ -83,7 +89,11 @@ class ScreenCaptureService : Service() {
             val uri = session?.uri ?: "/"
             return when (uri) {
                 "/stream" -> serveMjpeg()
-                else -> newFixedLengthResponse(Response.Status.OK, "text/html", "<html><body><h1>Screen Share</h1></body></html>")
+                else -> newFixedLengthResponse(
+                    Response.Status.OK,
+                    "text/html",
+                    "<html><body><h1>Screen Share</h1></body></html>"
+                )
             }
         }
 
@@ -93,25 +103,37 @@ class ScreenCaptureService : Service() {
 
         private fun serveMjpeg(): Response {
             val boundary = "--frame"
-            return newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=$boundary", object : Response.IStreamer {
-                override fun stream(out: OutputStream) {
-                    try {
-                        while (!Thread.currentThread().isInterrupted) {
-                            val frame = last ?: lastFrame
-                            if (frame != null) {
-                                val header = ("$boundary\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n").toByteArray()
-                                out.write(header)
-                                out.write(frame)
-                                out.write("\r\n".toByteArray())
-                                out.flush()
-                            }
-                            Thread.sleep(100)
+
+            val pipedOut = PipedOutputStream()
+            val pipedIn = PipedInputStream(pipedOut)
+
+            pool.submit {
+                try {
+                    while (!Thread.currentThread().isInterrupted) {
+                        val frame = last ?: lastFrame
+                        if (frame != null) {
+                            val header = ("$boundary\r\n" +
+                                    "Content-Type: image/jpeg\r\n" +
+                                    "Content-Length: ${frame.size}\r\n\r\n").toByteArray()
+                            pipedOut.write(header)
+                            pipedOut.write(frame)
+                            pipedOut.write("\r\n".toByteArray())
+                            pipedOut.flush()
                         }
-                    } catch (e: Exception) {
-                        // client disconnected
+                        Thread.sleep(100)
                     }
+                } catch (_: Exception) {
+                    // cliente desconectado
+                } finally {
+                    pipedOut.close()
                 }
-            })
+            }
+
+            return newChunkedResponse(
+                Response.Status.OK,
+                "multipart/x-mixed-replace; boundary=$boundary",
+                pipedIn
+            )
         }
     }
 }
