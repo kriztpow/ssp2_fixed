@@ -9,13 +9,12 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
-import java.net.NetworkInterface
-import java.util.Collections
 
 class ScreenCaptureService : Service() {
     private var mediaProjection: MediaProjection? = null
@@ -42,7 +41,13 @@ class ScreenCaptureService : Service() {
 
         if (intent != null) {
             val resultCode = intent.getIntExtra("resultCode", -1)
-            val data = intent.getParcelableExtra<Intent>("data")
+
+            val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra("data", Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra("data")
+            }
 
             if (resultCode != -1 && data != null) {
                 Log.d(TAG, "Starting projection with resultCode: $resultCode")
@@ -77,7 +82,6 @@ class ScreenCaptureService : Service() {
             imageReader?.surface, null, null
         )
 
-        // Aquí levantarías tu servidor web o lógica de streaming
         webServer = WebServer(8080)
         webServer?.start()
         Log.d(TAG, "Projection started and web server running on port 8080")
@@ -93,13 +97,15 @@ class ScreenCaptureService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            NOTIF_CHANNEL_ID,
-            "Screen Capture Service",
-            NotificationManager.IMPORTANCE_LOW
-        )
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIF_CHANNEL_ID,
+                "Screen Capture Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
     }
 
     private fun buildNotification(): Notification {
