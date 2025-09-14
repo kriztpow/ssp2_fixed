@@ -9,12 +9,13 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Build
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
+import java.net.NetworkInterface
+import java.util.Collections
 
 class ScreenCaptureService : Service() {
     private var mediaProjection: MediaProjection? = null
@@ -41,13 +42,7 @@ class ScreenCaptureService : Service() {
 
         if (intent != null) {
             val resultCode = intent.getIntExtra("resultCode", -1)
-
-            val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra("data", Intent::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra("data")
-            }
+            val data = intent.getParcelableExtra(Intent::class.java.classLoader, "data")
 
             if (resultCode != -1 && data != null) {
                 Log.d(TAG, "Starting projection with resultCode: $resultCode")
@@ -82,8 +77,12 @@ class ScreenCaptureService : Service() {
             imageReader?.surface, null, null
         )
 
+        // Iniciar servidor web
         webServer = WebServer(8080)
         webServer?.start()
+        val ip = getDeviceIpAddress()
+        Log.d(TAG, "🌐 Web server should be reachable at: http://$ip:8080")
+
         Log.d(TAG, "Projection started and web server running on port 8080")
     }
 
@@ -97,15 +96,13 @@ class ScreenCaptureService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIF_CHANNEL_ID,
-                "Screen Capture Service",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
-        }
+        val channel = NotificationChannel(
+            NOTIF_CHANNEL_ID,
+            "Screen Capture Service",
+            NotificationManager.IMPORTANCE_LOW
+        )
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(channel)
     }
 
     private fun buildNotification(): Notification {
@@ -123,9 +120,28 @@ class ScreenCaptureService : Service() {
     }
 
     // --- Servidor HTTP interno ---
-    inner class WebServer(port: Int) : NanoHTTPD(port) {
+    inner class WebServer(port: Int) : NanoHTTPD("0.0.0.0", port) {
         override fun serve(session: IHTTPSession?): Response {
-            return newFixedLengthResponse("Screen capture server is running")
+            val msg = "✅ Screen capture server is running at http://${getDeviceIpAddress()}:$listeningPort"
+            return newFixedLengthResponse(msg)
         }
+    }
+
+    // --- Obtener la IP de la red WiFi ---
+    private fun getDeviceIpAddress(): String {
+        try {
+            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+            for (intf in interfaces) {
+                val addrs = Collections.list(intf.inetAddresses)
+                for (addr in addrs) {
+                    if (!addr.isLoopbackAddress && addr.hostAddress.indexOf(':') < 0) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (ex: Exception) {
+            Log.e(TAG, "Error getting IP address", ex)
+        }
+        return "127.0.0.1"
     }
 }
