@@ -20,6 +20,7 @@ import android.util.Log
 import android.view.Surface
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.util.Collections
@@ -111,10 +112,11 @@ class ScreenCaptureService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        // Usar un icono de notificación por defecto de Android
         val notification = Notification.Builder(this, channelId)
             .setContentTitle("Screen Sharing Active")
             .setContentText("Streaming screen to ${getLocalIpAddress()}:8080")
-            .setSmallIcon(R.drawable.ic_notification_icon)
+            .setSmallIcon(android.R.drawable.ic_menu_camera) // Icono por defecto
             .setContentIntent(pendingIntent)
             .build()
 
@@ -162,6 +164,7 @@ class ScreenCaptureService : Service() {
         }
 
         override fun serve(session: IHTTPSession): Response {
+            // Usar newFixedLengthResponse en lugar de newChunkedResponse
             val response = newFixedLengthResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", null)
             response.addHeader("Connection", "close")
             response.addHeader("Max-Age", "0")
@@ -180,12 +183,17 @@ class ScreenCaptureService : Service() {
                             image.compress(Bitmap.CompressFormat.JPEG, 50, baos)
                             val imageBytes = baos.toByteArray()
 
-                            response.write("--frame\r\n".toByteArray())
-                            response.write("Content-Type: image/jpeg\r\n".toByteArray())
-                            response.write("Content-Length: ${imageBytes.size}\r\n\r\n".toByteArray())
-                            response.write(imageBytes)
-                            response.write("\r\n\r\n".toByteArray())
-
+                            // Usar el método send de la respuesta para enviar datos
+                            val outputStream = ByteArrayOutputStream()
+                            outputStream.write("--frame\r\n".toByteArray())
+                            outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
+                            outputStream.write("Content-Length: ${imageBytes.size}\r\n\r\n".toByteArray())
+                            outputStream.write(imageBytes)
+                            outputStream.write("\r\n\r\n".toByteArray())
+                            
+                            // Actualizar la respuesta con los datos
+                            response.setData(outputStream.toByteArray().inputStream())
+                            
                             // Small delay to prevent overwhelming the client
                             Thread.sleep(100)
                         }
