@@ -15,209 +15,192 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationCompat
+import android.view.Surface
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
-import java.io.IOException
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.util.Collections
-import java.util.concurrent.LinkedBlockingQueue
 
 class ScreenCaptureService : Service() {
-
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var webServer: WebServer? = null
-    private var mediaProjectionManager: MediaProjectionManager? = null
+    private var width = 1080
+    private var height = 1920
+    private var dpi = 320
 
-    private val notificationId = 101
-    private val channelId = "ScreenCaptureChannel"
-
-    override fun onCreate() {
-        super.onCreate()
-        mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        createNotificationChannel()
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent != null) {
             val resultCode = intent.getIntExtra("resultCode", -1)
             val data = intent.getParcelableExtra<Intent>("data")
-            if (data != null && resultCode != -1) {
-                startCapture(resultCode, data)
-            }
+            startProjection(resultCode, data)
         }
         return START_STICKY
     }
 
-    private fun startCapture(resultCode: Int, data: Intent) {
-        mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
-        imageReader = ImageReader.Builder(1080).setHeight(1920).setFormat(PixelFormat.RGBA_8888).setMaxImages(2).build()
+    private fun startProjection(resultCode: Int, data: Intent?) {
+        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data!!)
+        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        mediaProjection?.registerCallback(MediaProjectionCallback(), null)
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture",
-            1080,
-            1920,
-             resources.displayMetrics.densityDpi,
+            width, height, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            null
+            imageReader?.surface, null, null
         )
 
+        imageReader?.setOnImageAvailableListener(ImageAvailableListener(), null)
+        startWebServer()
+        createNotification()
+    }
+
+    private fun stopProjection() {
+        virtualDisplay?.release()
+        mediaProjection?.stop()
+        webServer?.stop()
+    }
+
+    private fun startWebServer() {
         webServer = WebServer()
         try {
             webServer?.start()
-            showNotification(webServer?.getHostAddress())
-        } catch (e: IOException) {
-            e.printStackTrace()
+            Log.d("WebServer", "Server started at: ${getLocalIpAddress()}:8080")
+        } catch (e: Exception) {
+            Log.e("WebServer", "Error starting server: ${e.message}")
         }
+    }
 
-        imageReader?.setOnImageAvailableListener({ reader ->
-            var image: Image? = null
-            try {
-                image = reader.acquireLatestImage()
-                if (image != null) {
-                    val bitmap = imageToBitmap(image)
-                    webServer?.updateImage(bitmap)
+    private fun getLocalIpAddress(): String {
+        try {
+            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+            for (intf in interfaces) {
+                val addrs = Collections.list(intf.inetAddresses)
+                for (addr in addrs) {
+                    if (!addr.isLoopbackAddress && addr.hostAddress.indexOf(':') < 0) {
+                        return addr.hostAddress
+                    }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                image?.close()
             }
-        }, null)
+        } catch (ex: Exception) {
+            Log.e("IPAddress", "Error getting IP address: ${ex.message}")
+        }
+        return "0.0.0.0"
     }
 
-    private fun imageToBitmap(image: Image): Bitmap {
-        val planes = image.planes
-        val buffer = planes[0].buffer
-        val pixelStride = planes[0].pixelStride
-        val rowStride = planes[0].rowStride
-        val rowPadding = rowStride - pixelStride * image.width
-        val width = image.width + rowPadding / pixelStride
-        val bitmap = Bitmap.createBitmap(width, image.height, Bitmap.Config.ARGB_8888)
-        bitmap.copyPixelsFromBuffer(buffer)
-        return bitmap
-    }
+    private fun createNotification() {
+        val channelId = "screen_capture_channel"
+        val channelName = "Screen Capture Service"
+        val importance = NotificationManager.IMPORTANCE_DEFAULT
+        val channel = NotificationChannel(channelId, channelName, importance)
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.createNotificationChannel(channel)
 
-    private fun showNotification(ipAddress: String?) {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
-            this,
-            0, notificationIntent, PendingIntent.FLAG_IMMUTABLE
+            this, 0, notificationIntent, 
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Transmisión de pantalla activa")
-            .setContentText("Dirección: $ipAddress")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+        val notification = Notification.Builder(this, channelId)
+            .setContentTitle("Screen Sharing Active")
+            .setContentText("Streaming screen to ${getLocalIpAddress()}:8080")
+            .setSmallIcon(R.drawable.ic_notification_icon)
             .setContentIntent(pendingIntent)
             .build()
 
-        startForeground(notificationId, notification)
+        startForeground(1, notification)
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                channelId,
-                "Screen Capture Service Channel",
-                NotificationManager.IMPORTANCE_DEFAULT
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
+    inner class MediaProjectionCallback : MediaProjection.Callback() {
+        override fun onStop() {
+            stopProjection()
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? {
-        return null
-    }
+    inner class ImageAvailableListener : ImageReader.OnImageAvailableListener {
+        override fun onImageAvailable(reader: ImageReader?) {
+            var image: Image? = null
+            try {
+                image = reader?.acquireLatestImage()
+                if (image != null) {
+                    val planes = image.planes
+                    val buffer = planes[0].buffer
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * width
 
-    override fun onDestroy() {
-        super.onDestroy()
-        webServer?.stop()
-        virtualDisplay?.release()
-        mediaProjection?.stop()
+                    // Create bitmap
+                    val bitmap = Bitmap.createBitmap(
+                        width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888
+                    )
+                    bitmap.copyPixelsFromBuffer(buffer)
+                    webServer?.updateImage(bitmap)
+                }
+            } catch (e: Exception) {
+                Log.e("ImageAvailable", "Error processing image: ${e.message}")
+            } finally {
+                image?.close()
+            }
+        }
     }
 
     inner class WebServer : NanoHTTPD(8080) {
-
-        private val imageQueue = LinkedBlockingQueue<Bitmap>(2)
-        private var isStreaming = false
+        private var latestImage: Bitmap? = null
 
         fun updateImage(bitmap: Bitmap) {
-            if (imageQueue.size >= 2) {
-                imageQueue.poll()
-            }
-            imageQueue.offer(bitmap)
-        }
-
-        fun getHostAddress(): String {
-            var ip = ""
-            try {
-                val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-                for (intf in interfaces) {
-                    val addrs = Collections.list(intf.inetAddresses)
-                    for (addr in addrs) {
-                        if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                            ip = addr.hostAddress
-                            break
-                        }
-                    }
-                }
-            } catch (ex: Exception) {
-                ex.printStackTrace()
-            }
-            return "http://$ip:8080/stream"
+            latestImage = bitmap
         }
 
         override fun serve(session: IHTTPSession): Response {
-            if (session.uri == "/stream") {
-                isStreaming = true
-                val response = Response.newChunkedResponse(
-                    Response.Status.OK,
-                    "multipart/x-mixed-replace; boundary=--frameboundary",
-                    null
-                )
-                response.addHeader("Connection", "close")
-                response.addHeader("Max-Age", "0")
-                response.addHeader("Expires", "0")
-                response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0")
-                response.addHeader("Pragma", "no-cache")
-                response.addHeader("Access-Control-Allow-Origin", "*")
+            val response = newFixedLengthResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", null)
+            response.addHeader("Connection", "close")
+            response.addHeader("Max-Age", "0")
+            response.addHeader("Expires", "0")
+            response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Access-Control-Allow-Origin", "*")
+            response.addHeader("Access-Control-Allow-Methods", "GET, POST")
+            response.addHeader("Access-Control-Allow-Headers", "Content-Type")
 
-                Thread {
-                    try {
-                        while (isStreaming) {
-                            val image = imageQueue.take()
+            Thread {
+                try {
+                    while (true) {
+                        latestImage?.let { image ->
                             val baos = ByteArrayOutputStream()
                             image.compress(Bitmap.CompressFormat.JPEG, 50, baos)
                             val imageBytes = baos.toByteArray()
 
-                            val part = "--frameboundary\r\n" +
-                                    "Content-Type: image/jpeg\r\n" +
-                                    "Content-Length: ${imageBytes.size}\r\n" +
-                                    "\r\n"
-                            response.write(part.toByteArray())
+                            response.write("--frame\r\n".toByteArray())
+                            response.write("Content-Type: image/jpeg\r\n".toByteArray())
+                            response.write("Content-Length: ${imageBytes.size}\r\n\r\n".toByteArray())
                             response.write(imageBytes)
-                            response.write("\r\n".toByteArray())
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    } finally {
-                        isStreaming = false
-                    }
-                }.start()
+                            response.write("\r\n\r\n".toByteArray())
 
-                return response
-            }
-            return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
+                            // Small delay to prevent overwhelming the client
+                            Thread.sleep(100)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("WebServer", "Error serving stream: ${e.message}")
+                }
+            }.start()
+
+            return response
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopProjection()
     }
 }
