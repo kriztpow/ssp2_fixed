@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.screenshare">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Permisos necesarios -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -8,9 +7,8 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    
 
-    <!-- Si realmente necesitas WiFi (sino puedes quitarlo para evitar errores) -->
+    <!-- Solo si realmente necesitas manejar WiFi -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
